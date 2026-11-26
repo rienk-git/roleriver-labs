@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "allowJs": false,
+    "checkJs": false
+  },
+  "include": [
+    "apps/cli/main.ts",
+    "apps/cli/run.ts",
+    "packages/ai/assessment.ts",
+    "packages/ai/openai.ts",
+    "packages/domain/input.ts",
+    "packages/domain/objective.ts"
+  ]
+}

@@ -1,12 +1,18 @@
 import { z } from "zod";
 import type { AssessmentInput } from "../domain/input.js";
 
-export const PROMPT_VERSION = "assessment-v1";
-export const SCHEMA_VERSION = "assessment-v1";
+export const PROMPT_VERSION = "assessment-v2";
+export const SCHEMA_VERSION = "assessment-v2";
 
 const evidence = z.strictObject({ source: z.string(), quote: z.string() });
 export const assessmentSchema = z.strictObject({
   recommendation: z.enum(["apply", "review", "skip"]),
+  roleAlignment: z.strictObject({
+    status: z.enum(["aligned", "unclear", "not_aligned"]),
+    explanation: z.string(),
+    vacancyEvidence: z.array(evidence),
+    candidateEvidence: z.array(evidence),
+  }),
   matchScore: z.number().nullable(),
   confidence: z.enum(["low", "medium", "high"]),
   vacancyCompleteness: z.enum(["full", "partial", "unknown"]),
@@ -81,6 +87,26 @@ export function validateEvidence(
   const validQuote = (item: { source: string; quote: string }) =>
     item.quote.trim().length > 0 &&
     (sourceText.get(item.source)?.includes(item.quote) ?? false);
+  const roleAlignment = value.roleAlignment;
+  if (!roleAlignment.explanation.trim()) return false;
+  if (
+    !roleAlignment.vacancyEvidence.every(
+      (item) => item.source === "vacancy" && validQuote(item),
+    )
+  )
+    return false;
+  if (
+    !roleAlignment.candidateEvidence.every(
+      (item) => item.source !== "vacancy" && validQuote(item),
+    )
+  )
+    return false;
+  if (
+    roleAlignment.status === "aligned" &&
+    (roleAlignment.vacancyEvidence.length === 0 ||
+      roleAlignment.candidateEvidence.length === 0)
+  )
+    return false;
   if (
     value.matchScore !== null &&
     (!Number.isFinite(value.matchScore) ||
@@ -90,7 +116,9 @@ export function validateEvidence(
     return false;
   if (
     value.recommendation === "apply" &&
-    (value.disqualifiers.length > 0 || value.vacancyCompleteness !== "full")
+    (value.disqualifiers.length > 0 ||
+      value.vacancyCompleteness !== "full" ||
+      value.roleAlignment.status !== "aligned")
   )
     return false;
   for (const requirement of value.requirements) {
