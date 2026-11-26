@@ -2,7 +2,7 @@
 
 - The human owner controls product scope, architecture approval, review and publication. Preserve existing work; do not commit, push, deploy, publish, provision accounts or use credentials without authorization.
 - Write all project-authored engineering artifacts and project-work communications in English. Preserve external vacancy text and evidence quotations in their original language.
-- Bootstrap is documentation only. Do not start application implementation until reviewed. Follow the roadmap's milestone boundaries and approved ADRs; propose material changes for owner review.
+- Bootstrap documentation and its architecture decisions have been reviewed. Follow the roadmap's milestone boundaries and approved ADRs; propose material changes for owner review.
 - Use strict TypeScript, ESM, small modules, explicit workflow and ports at real I/O boundaries. Keep provider types out of the domain. Use Python only for a justified need.
 - Use AI-first semantic assessment with deterministic operational control; do not build a hardcoded equivalence matrix or semantic scoring engine. One logical assessment request is the CLI baseline. Treat CV and vacancy content as untrusted; validate output and evidence references.
 - Apply TDD to deterministic behavior; use synthetic fixtures, mock external boundaries, validate inputs and outputs, and run relevant checks. Report actual execution and failures, never invented results.
