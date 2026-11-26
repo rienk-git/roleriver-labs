@@ -1,0 +1,42 @@
+# Local secrets and personal data
+.env*
+!.env.example
+.local/
+data/
+private/
+*profile.private.*
+*cv.private.*
+credentials*.json
+token*.json
+storage-state*.json
+playwright/.auth/
+
+# Dependencies and generated output
+node_modules/
+.pnpm-store/
+.next/
+out/
+dist/
+coverage/
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.pyc
+*.db
+*.db-*
+*.sqlite*
+*.log
+logs/
+test-results/
+playwright-report/
+*.trace.zip
+screenshots/
+.DS_Store
+
+# Local infrastructure and object storage
+.dynamodb/
+dynamodb-data/
+.localstack/
+object-storage/

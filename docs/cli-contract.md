@@ -1,0 +1,9 @@
+# Proposed CLI contract
+
+Not implemented. Illustrative invocation: `roleriver assess --cv <path> --vacancy <path> [--preferences <path>] --format text|json`. CV and vacancy text suffice; optional input supplies structured preferences and clearly labelled supplementary evidence or corrections. Vacancy metadata can record source, completeness, status and dates. Exact file formats, option syntax, schema and exit codes remain to be agreed. The CLI needs no database, Google login, Gmail, browser or cloud infrastructure.
+
+A narrow OpenAI provider adapter makes one logical structured assessment request, using a versioned prompt and output schema; bounded retries are observable. Default offline tests use a mocked provider; live assessment is opt-in, separately billed and uses user-supplied local credentials. Known objective disqualifiers may be checked before a paid call.
+
+Output provides original requirement text and evidence, classified assessments and candidate references, gaps, disqualifiers, uncertainty, completeness/status warnings, recommendation, disposition and versioned provenance. Optional scores are indicative, not probabilities or sole notification gates. JSON is versioned; text conveys equivalent material facts. Validate schema, resolvable references and consistency; schema validity does not prove truth. Unknown evidence is not failure. No private text is logged by default.
+
+Unreadable or invalid input, provider failure/timeout, invalid or contradictory output and unresolved required evidence yield controlled errors or explicit unknown outcomes, never fabricated success. Acceptance: a synthetic CV and vacancy exercise a complete offline mocked-provider vertical slice; deterministic rules, evidence references and error paths are tested; output validates; live calls require explicit opt-in.

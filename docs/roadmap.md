@@ -1,0 +1,24 @@
+# Living roadmap
+
+Estimates are proposed elapsed active development hours, not deadlines or measured history. Preserve this initial baseline after review; later revisions require a reason. Actual sessions link to the [development log](development-log.md); do not allocate a shared session to tasks without evidence. Owners are proposed specialists; the orchestrator integrates and the human approves. Independent work may overlap only with distinct ownership and contracts. Estimates below are summed serial planning ranges, not a promise or prediction of parallel elapsed time.
+
+| ID | Task | Dependencies | Owner(s) | Status | Baseline hours | Revised | Actual | Acceptance / parallel work |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| B01 | Bootstrap, architecture decisions, policies, roles and review plan | None | Orchestrator | In progress | 4–8 | — | 3 hours (owner estimate); [log](development-log.md) | Documentation reviewed; configuration compatibility remains unverified |
+| C01 | Pin compatible tools; minimal workspace and CI | B01 review | DevOps, TypeScript | Not started | 3–6 | — | — | Frozen install and checks reproducible; parallel with C02 design |
+| C02 | CV/vacancy contracts and objective rules | B01 review | Architect, TypeScript, QA | Not started | 6–12 | 4–8 | — | CV and vacancy suffice; unknowns, dates and reliable intervals tested |
+| C03 | Single assessment provider port | C02 contracts | TypeScript, QA | Not started | 6–12 | — | — | One logical request, structured evidence and failures mocked; opt-in live eval |
+| C04 | Assessment and CLI output | C01–C03 | TypeScript, QA | Not started | 6–12 | — | — | Synthetic CV/vacancy vertical slice, evidence validation and offline end-to-end cases pass |
+| I01 | DynamoDB access patterns, ElectroDB adapter and local object storage | C04 | Architect, TypeScript, DevOps, QA | Not started | 14–28 | — | — | Tenant-scoped access, conditional writes, pagination, deduplication, recovery and local contract tests; no cloud account |
+| I02 | Gmail polling and manual import | I01 | TypeScript, security, QA | Not started | 12–24 | — | — | Personal CLI OAuth, optional consent, revocation, checkpoint recovery and policy review; no dashboard dependency |
+| E01 | Policy enforcement and permitted enrichment | I01 | TypeScript, security, QA | Not started | 10–20 | — | — | Denied redirect/method, evidence and rate limits tested; parallel with I02 after contracts |
+| N01 | Decisions, notifications and scheduling | I02, E01 | TypeScript, QA | Not started | 8–16 | — | — | Actionable changes only, retries and idempotency tested |
+| D01 | Independent API/BFF, Google identity and Gmail connection | N01 | Architect, TypeScript, security | Not started | 18–36 | — | — | Reviewed OIDC/BFF flow, HttpOnly session cookie, server-side token refresh, separate Gmail consent, ownership and OpenAPI |
+| D02 | Static dashboard and synthetic demo | D01 contract, N01 | Frontend, QA, security | Not started | 20–40 | — | — | Static export, accessible flows, synthetic data and host refresh tested; can begin UI against mocks with D01 |
+| O01 | Authorized portals | N01 | TypeScript, security, QA | Deferred | 12–30 | — | — | Per-source permission and session review; independent of dashboard |
+| O02 | Python document intelligence | C04 | Python, architect, QA | Deferred | 12–30 | — | — | Concrete need, locked tooling and contract tests; independent of dashboard |
+| O03 | Distribution and optional cloud | N01 | DevOps, architect, security | Deferred | 20–50 | — | — | Documented operational need and delivery semantics; independent of dashboard |
+
+C02 revised to 4–8 hours because the MVP no longer requires a structured profile or comprehensive semantic rules; C03/C04 retain their baseline pending evaluation. Revised serial B01 through N01: 67–134 hours; including D01–D02: 105–210 hours. Baseline B01 through N01: 69–138 hours; including D01–D02: 107–214 hours. Optional O01–O03 separately: 44–110 hours. These sums assume no overlap and are planning ranges only. Critical dependency path to monitoring: B01 → C02 → C03 → C04 → I01 → I02/E01 → N01; C01 must also precede C04. Dashboard follows N01 and API contract (D01 → D02), not optional work. Critical path is provisional until scheduling and parallel capacity are known.
+
+Definition of done: scoped acceptance and security review where applicable, synthetic evidence, applicable tests and quality gates actually passing, documentation and log updated, remaining risks disclosed and human review obtained. B01 recorded time is an owner estimate of 3 hours, 1–5 hours below its 4–8 hour baseline; configuration compatibility remains unverified. Next: resolve configuration compatibility and begin C01/C02 when authorized. No calendar deadlines are implied.
