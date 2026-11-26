@@ -1,0 +1,17 @@
+min_version = "2026.11.14"
+
+[tools]
+node = "26.13.0"
+"npm:pnpm" = "10.34.9"
+
+[tasks.install]
+description = "Install locked dependencies"
+run = "pnpm install --frozen-lockfile"
+
+[tasks.check]
+description = "Run formatting, linting, typechecking, and tests"
+run = "pnpm check"
+
+[tasks.test]
+description = "Run tests"
+run = "pnpm test"

@@ -1,0 +1,3 @@
+# Bootstrap prose is not yet formatted with Prettier.
+**/*.md
+pnpm-lock.yaml
