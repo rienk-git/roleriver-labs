@@ -14,7 +14,7 @@ mise run check
 
 The check runs formatting, linting, typechecking and the test runner. There are no application tests yet. Node.js 26 Linux binaries may require `libatomic`; see the [Node.js release notes](https://nodejs.org/en/blog/release/v26.13.0/). The workspace does not require AWS or Google credentials.
 
-The [product architecture](docs/architecture.md) is an explicit workflow, not a set of autonomous runtime agents. Separately, [AI-assisted development](docs/ai-assisted-development.md) describes human-governed specialist roles. See the [roadmap](docs/roadmap.md), [source policies](docs/source-policies.md), and [development log](docs/development-log.md). The log records approximate elapsed active session time, counting parallel work once and explicitly marking unknown durations; it is not a productivity claim.
+The [product architecture](docs/architecture.md) is an explicit workflow, not a set of autonomous runtime agents. Separately, [AI-assisted development](docs/ai-assisted-development.md) describes human-governed specialist roles. See the [architecture decisions](docs/adr/), [roadmap](docs/roadmap.md), [source policies](docs/source-policies.md), and [development log](docs/development-log.md). Contributors can use the included specialists or define their own by following the [agent workflow](docs/agent-workflow.md). The log records approximate elapsed active session time, counting parallel work once and explicitly marking unknown durations; it is not a productivity claim.
 
 Keep profiles, vacancy content, credentials and tokens private. Only synthetic examples and public-safe material should be committed. See [security](SECURITY.md) and the [threat model](docs/threat-model.md).
 
