@@ -44,5 +44,13 @@ describe("opt-in live assessment evaluation", () => {
     expect(requirement?.status).toBe("not_met");
     expect(requirement?.candidateEvidence.length).toBeGreaterThan(0);
     expect(result.assessment.recommendation).not.toBe("apply");
+    if (result.assessment.roleAlignment.status === "aligned") {
+      expect(
+        result.assessment.roleAlignment.vacancyEvidence.length,
+      ).toBeGreaterThan(0);
+      expect(
+        result.assessment.roleAlignment.candidateEvidence.length,
+      ).toBeGreaterThan(0);
+    }
   }, 150_000);
 });

@@ -1,6 +1,6 @@
 # Development log
 
-Approximate elapsed development time recorded: 6 hours (partial; estimated)
+Approximate elapsed development time recorded: 6.5 hours (partial; estimated)
 Sessions with unknown duration: 1
 
 Timing method: elapsed active development time; overlapping work counts once. See the [roadmap](roadmap.md).
@@ -14,3 +14,4 @@ Timing method: elapsed active development time; overlapping work counts once. Se
 | 2026-11-26 | C02: input contracts and objective rules | 0.5 hours (owner estimate) | Added validation and synthetic tests for verified deadlines, numeric thresholds and interval unions; quality checks and independent QA passed. |
 | 2026-11-26 | C03: AI assessment adapter and review | 0.75 hours (owner estimate) | QA/security reviews and 30 offline tests passed; live evaluation is opt-in and was not run. |
 | 2026-11-27 | Credential lifecycle planning | Unknown | Added project-key rotation guidance and optional AWS workload identity evaluation to the roadmap. |
+| 2026-11-27 | C04: matching CLI | 0.5 hours (owner estimate) | Local CLI, mocked end-to-end checks, v2 role alignment and QA/security reviews prepared; no live call. |

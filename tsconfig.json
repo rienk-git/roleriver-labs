@@ -6,7 +6,8 @@
     "allowJs": true,
     "checkJs": true,
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": ["node"]
   },
   "include": ["eslint.config.mjs", "apps/**/*.ts", "packages/**/*.ts"]
 }

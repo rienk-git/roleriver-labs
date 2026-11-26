@@ -11,9 +11,11 @@
     "format:check": "prettier --check . --ignore-unknown",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests --exclude \"**/*.live.test.ts\"",
+    "test": "pnpm build && vitest run --passWithNoTests --exclude \"**/*.live.test.ts\"",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
-    "eval:live": "vitest run packages/ai/evals/assessment.live.test.ts"
+    "eval:live": "vitest run packages/ai/evals/assessment.live.test.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "cli": "node dist/apps/cli/main.js"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -8,6 +8,12 @@ const input = {
 };
 const valid = {
   recommendation: "apply",
+  roleAlignment: {
+    status: "aligned",
+    explanation: "Role responsibilities align",
+    vacancyEvidence: [{ source: "vacancy", quote: "PHP experience required" }],
+    candidateEvidence: [{ source: "cv", quote: "Built PHP APIs" }],
+  },
   matchScore: 80,
   confidence: "medium",
   vacancyCompleteness: "full",
@@ -164,6 +170,43 @@ describe("OpenAI assessment provider", () => {
         "allowed",
       ),
     ).toEqual({ ok: false, error: "invalid_output" });
+  });
+  it("rejects apply recommendations when role alignment is unclear or not aligned", async () => {
+    for (const status of ["unclear", "not_aligned"] as const) {
+      const roleAlignment = {
+        status,
+        explanation: "Alignment not established",
+        vacancyEvidence: [],
+        candidateEvidence: [],
+      };
+      expect(
+        await provider(
+          vi.fn(async () => response({ ...valid, roleAlignment })),
+        ).assess(input, "allowed"),
+      ).toEqual({ ok: false, error: "invalid_output" });
+    }
+  });
+  it("rejects unsupported role alignment evidence", async () => {
+    const invalidAlignments = [
+      { ...valid.roleAlignment, candidateEvidence: [] },
+      { ...valid.roleAlignment, vacancyEvidence: [] },
+      { ...valid.roleAlignment, explanation: "  " },
+      {
+        ...valid.roleAlignment,
+        candidateEvidence: [{ source: "cv", quote: "invented" }],
+      },
+      {
+        ...valid.roleAlignment,
+        vacancyEvidence: [{ source: "cv", quote: "Built PHP APIs" }],
+      },
+    ];
+    for (const roleAlignment of invalidAlignments) {
+      expect(
+        await provider(
+          vi.fn(async () => response({ ...valid, roleAlignment })),
+        ).assess(input, "allowed"),
+      ).toEqual({ ok: false, error: "invalid_output" });
+    }
   });
   it("does not expose the credential when the provider is serialized or enumerated", () => {
     const instance = provider(vi.fn(async () => response(valid)));
