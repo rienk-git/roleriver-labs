@@ -21,3 +21,20 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - name: Start DynamoDB Local
+        run: docker compose -f infrastructure/docker/compose.yml -p roleriver-ci up -d
+      - name: Wait for DynamoDB Local
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --silent --output /dev/null http://127.0.0.1:18000/; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Run isolated persistence integration tests
+        env:
+          ROLERIVER_DYNAMODB_TEST: "1"
+          ROLERIVER_DYNAMODB_TEST_URL: http://127.0.0.1:18000
+        run: pnpm test:integration
+      - name: Stop DynamoDB Local
+        if: always()
+        run: docker compose -f infrastructure/docker/compose.yml -p roleriver-ci down

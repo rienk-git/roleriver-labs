@@ -22,4 +22,4 @@ The [product architecture](docs/architecture.md) is an explicit workflow, not a 
 
 Keep profiles, vacancy content, credentials and tokens private. Only synthetic examples and public-safe material should be committed. See [security](SECURITY.md) and the [threat model](docs/threat-model.md).
 
-Planned persistence after the CLI uses DynamoDB and private S3, with local infrastructure for development. The later static dashboard uses Google sign-in and offers Gmail connection separately; its public demo will use synthetic data without login. No cloud resources or OAuth accounts have been created.
+The initial persistence foundation uses DynamoDB Local and a filesystem object adapter for development; the CLI does not use persistence yet. See the [persistence design](docs/persistence-design.md) for local integration tests, safety boundaries and deferred work. Planned production persistence uses DynamoDB and private S3. The later static dashboard uses Google sign-in and offers Gmail connection separately; its public demo will use synthetic data without login. No cloud resources or OAuth accounts have been created.

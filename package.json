@@ -11,11 +11,12 @@
     "format:check": "prettier --check . --ignore-unknown",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "pnpm build && vitest run --passWithNoTests --exclude \"**/*.live.test.ts\"",
+    "test": "pnpm build && vitest run --passWithNoTests --exclude \"**/*.live.test.ts\" --exclude \"**/*.integration.test.ts\"",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
     "eval:live": "vitest run packages/ai/evals/assessment.live.test.ts",
     "build": "tsc -p tsconfig.build.json",
-    "cli": "node dist/apps/cli/main.js"
+    "cli": "node dist/apps/cli/main.js",
+    "test:integration": "vitest run packages/persistence/dynamodb.integration.test.ts"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
@@ -27,6 +28,9 @@
     "vitest": "5.1.2"
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1178.0",
+    "@aws-sdk/lib-dynamodb": "3.1178.0",
+    "electrodb": "3.9.3",
     "zod": "4.6.7"
   }
 }
