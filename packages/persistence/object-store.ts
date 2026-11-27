@@ -1,6 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, link, unlink, realpath } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  link,
+  unlink,
+  realpath,
+  readdir,
+} from "node:fs/promises";
 import { resolve, join } from "node:path";
 import type { ObjectStore } from "./ports.js";
 
@@ -13,6 +21,8 @@ function sanitize(error: unknown): ObjectStoreError {
 
 const MAX_OBJECT_BYTES = 1024 * 1024;
 const idPattern = /^[A-Za-z0-9_-]{1,64}$/;
+const temporaryPattern =
+  /^\.tmp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 function checkId(value: string): void {
   if (!idPattern.test(value))
     throw new ObjectStoreError("Invalid object identifier");
@@ -131,7 +141,7 @@ export class LocalObjectStore implements ObjectStore {
       throw new ObjectStoreError("Object exceeds size limit");
     const dir = (await this.directory(tenantId, true))!;
     const metadata = { size: content.byteLength, sha256: digest(content) };
-    const tmp = join(dir, `tmp_${randomUUID()}`);
+    const tmp = join(dir, `.tmp-${randomUUID()}`);
     const target = join(dir, objectId);
     const file = await open(
       tmp,
@@ -174,6 +184,38 @@ export class LocalObjectStore implements ObjectStore {
       await syncDirectory(dir);
     }
     return metadata;
+  }
+
+  /**
+   * Remove crash-left staging links for one tenant. The caller must ensure that
+   * no process is writing to this tenant while cleanup runs; this adapter cannot
+   * enforce cross-process exclusion. Legacy tmp_<UUID> names are valid object IDs
+   * and cannot safely be distinguished from objects, so they are never removed.
+   */
+  async cleanupTemporaryFiles(tenantId: string): Promise<number> {
+    try {
+      const dir = await this.directory(tenantId, false);
+      if (!dir) return 0;
+      let removed = 0;
+      for (const name of await readdir(dir)) {
+        if (!temporaryPattern.test(name)) continue;
+        const path = join(dir, name);
+        const stats = await lstat(path);
+        if (
+          !stats.isFile() ||
+          stats.isSymbolicLink() ||
+          stats.uid !== process.getuid!()
+        )
+          throw new ObjectStoreError("Invalid temporary object");
+        await unlink(path);
+        removed++;
+      }
+      // Also sync on empty retries, including after an earlier sync failure.
+      await syncDirectory(dir);
+      return removed;
+    } catch (error) {
+      throw sanitize(error);
+    }
   }
 
   async get(
