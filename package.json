@@ -16,7 +16,7 @@
     "eval:live": "vitest run packages/ai/evals/assessment.live.test.ts",
     "build": "tsc -p tsconfig.build.json",
     "cli": "node dist/apps/cli/main.js",
-    "test:integration": "vitest run packages/persistence/dynamodb.integration.test.ts"
+    "test:integration": "vitest run packages/persistence/*.integration.test.ts"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

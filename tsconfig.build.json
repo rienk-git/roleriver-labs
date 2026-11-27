@@ -16,6 +16,12 @@
     "packages/domain/objective.ts",
     "packages/persistence/dynamodb.ts",
     "packages/persistence/object-store.ts",
-    "packages/persistence/ports.ts"
-  ]
+    "packages/persistence/ports.ts",
+    "packages/persistence/gmail-state.ts",
+    "packages/persistence/manual-import.ts",
+    "packages/ingestion/**/*.ts",
+    "packages/source-gmail/**/*.ts",
+    "packages/source-policy/**/*.ts"
+  ],
+  "exclude": ["**/*.test.ts"]
 }
