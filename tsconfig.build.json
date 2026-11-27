@@ -18,6 +18,7 @@
     "packages/persistence/object-store.ts",
     "packages/persistence/ports.ts",
     "packages/persistence/gmail-state.ts",
+    "packages/persistence/gmail-ledger.ts",
     "packages/persistence/manual-import.ts",
     "packages/ingestion/**/*.ts",
     "packages/source-gmail/**/*.ts",

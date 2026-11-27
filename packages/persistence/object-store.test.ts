@@ -1,4 +1,12 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  link,
+  mkdtemp,
+  mkdir,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -19,6 +27,41 @@ afterEach(async () => {
 
 describe("local object storage", () => {
   objectStoreContract(async () => LocalObjectStore.open(await createRoot()));
+  it("cleans only reserved temporary entries while preserving their linked objects", async () => {
+    const root = await createRoot();
+    const store = await LocalObjectStore.open(root);
+    const bytes = new TextEncoder().encode("synthetic");
+    await store.put("tenant-a", "object-1", bytes);
+    const dir = join(root, "tenant-a");
+    const temporary = ".tmp-123e4567-e89b-42d3-a456-426614174000";
+    await link(join(dir, "object-1"), join(dir, temporary));
+    await writeFile(
+      join(dir, "tmp_123e4567-e89b-42d3-a456-426614174000"),
+      "valid object",
+    );
+    await writeFile(join(dir, ".tmp-not-a-uuid"), "unrecognized");
+    expect(await store.cleanupTemporaryFiles("tenant-a")).toBe(1);
+    expect(await store.get("tenant-a", "object-1")).toEqual(bytes);
+    expect(await readdir(dir)).toEqual(
+      expect.arrayContaining([
+        "object-1",
+        "tmp_123e4567-e89b-42d3-a456-426614174000",
+        ".tmp-not-a-uuid",
+      ]),
+    );
+    expect(await store.cleanupTemporaryFiles("tenant-a")).toBe(0);
+    expect(await store.cleanupTemporaryFiles("missing")).toBe(0);
+  });
+  it("refuses symlinks in the reserved temporary namespace", async () => {
+    const root = await createRoot();
+    const store = await LocalObjectStore.open(root);
+    await store.put("tenant-a", "object-1", new Uint8Array());
+    await symlink(
+      join(root, "outside"),
+      join(root, "tenant-a", ".tmp-123e4567-e89b-42d3-a456-426614174000"),
+    );
+    await expect(store.cleanupTemporaryFiles("tenant-a")).rejects.toThrow();
+  });
   it("treats retry of identical content as idempotent and detects conflicting or corrupted objects", async () => {
     const root = await createRoot();
     const store = await LocalObjectStore.open(root);
