@@ -38,6 +38,14 @@ async function privateDirectory(path: string): Promise<void> {
 function digest(content: Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
 }
+async function syncDirectory(path: string): Promise<void> {
+  const directory = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
 
 /**
  * Uses a trusted private root; every ancestor must also be trusted and must not
@@ -88,6 +96,8 @@ export class LocalObjectStore implements ObjectStore {
         ))
           throw error;
       }
+      // Persist the tenant directory entry before any object can be referenced.
+      await syncDirectory(this.#root);
     }
     try {
       await privateDirectory(path);
@@ -157,8 +167,11 @@ export class LocalObjectStore implements ObjectStore {
           throw new ObjectStoreError("Object identifier conflict");
         }
       }
+      // A synced file alone does not make its directory entry crash durable.
+      await syncDirectory(dir);
     } finally {
       await unlink(tmp);
+      await syncDirectory(dir);
     }
     return metadata;
   }
@@ -250,5 +263,6 @@ export class LocalObjectStore implements ObjectStore {
     } catch (error) {
       if (!missing(error)) throw error;
     }
+    await syncDirectory(dir);
   }
 }
