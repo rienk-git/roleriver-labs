@@ -1,5 +1,5 @@
 /* Provider failures may contain private data; never expose them as causes. */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   DynamoDBDocumentClient,
   GetCommand,
@@ -12,7 +12,8 @@ import type {
   PollScope,
   ReconciledMessage,
 } from "../source-gmail/poll.js";
-import type { ObjectStore } from "./ports.js";
+import { GmailObjectLifecycle } from "./gmail-objects.js";
+import { connectedCondition } from "./gmail-connection.js";
 
 const id = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
@@ -28,8 +29,9 @@ function validObject(value: unknown): boolean {
   const object = value as Record<string, unknown>;
   return (
     typeof object.id === "string" &&
-    /^[a-f0-9]{64}$/.test(object.id) &&
-    object.sha256 === object.id &&
+    /^go_[a-f0-9]{32}$/.test(object.id) &&
+    typeof object.sha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(object.sha256) &&
     typeof object.size === "number" &&
     Number.isSafeInteger(object.size) &&
     object.size >= 0 &&
@@ -51,6 +53,7 @@ function keys(scope: PollScope) {
     prefix,
     lease: { pk, sk: "lease" },
     checkpoint: { pk, sk: `checkpoint#${hash(scope.sourceId)}` },
+    attempt: { pk, sk: `attempt#${hash(scope.sourceId)}` },
     sync: { pk, sk: `${prefix}sync` },
     message: (messageId: string) => ({
       pk,
@@ -60,21 +63,6 @@ function keys(scope: PollScope) {
 }
 
 type Message = Exclude<ReconciledMessage, { kind: "unknown" }>;
-interface LedgerRecord {
-  pk: string;
-  sk: string;
-  messageId: string;
-  revision: string;
-  kind: "eligible" | "excluded";
-  active: boolean;
-  seen?: number;
-  configVersion?: string;
-  generation: number;
-  origin: "gmail";
-  externalProcessing: "not_authorized";
-  object?: { id: string; size: number; sha256: string };
-}
-
 /**
  * The caller authenticates the tenant and controls access to the object store.
  * Never delete an object following a failed operation: a retry or another record
@@ -89,7 +77,7 @@ export class GmailLedgerRepository {
   constructor(
     private readonly client: DynamoDBDocumentClient,
     private readonly table: string,
-    private readonly objects: Pick<ObjectStore, "put">,
+    private readonly objects: GmailObjectLifecycle,
   ) {
     if (!/^[A-Za-z0-9_.-]{3,255}$/.test(table)) fail();
   }
@@ -104,6 +92,37 @@ export class GmailLedgerRepository {
           "#expires": "expiresAt",
         },
         ExpressionAttributeValues: { ":generation": fence, ":now": Date.now() },
+      },
+    };
+  }
+  private activeAttempt(scope: PollScope, fence: number) {
+    return {
+      ConditionCheck: {
+        TableName: this.table,
+        Key: keys(scope).attempt,
+        ConditionExpression: "epoch = :epoch AND #status = :active",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":epoch": fence, ":active": "active" },
+      },
+    };
+  }
+  private processingReleased(scope: PollScope, objectId: string) {
+    const k = keys(scope);
+    return {
+      ConditionCheck: {
+        TableName: this.table,
+        Key: {
+          pk: k.pk,
+          sk: `hold#${hash(scope.sourceId)}#${objectId}#${hash(JSON.stringify(["processing", "initial"]))}`,
+        },
+        ConditionExpression:
+          "#status = :released AND kind = :kind AND holdId = :id",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":released": "released",
+          ":kind": "processing",
+          ":id": "initial",
+        },
       },
     };
   }
@@ -137,6 +156,7 @@ export class GmailLedgerRepository {
       config: PollConfig,
       fence: string,
     ) => {
+      scope = Object.freeze({ ...scope });
       try {
         const generation = fenceValue(fence);
         if (!id(config.version)) return fail();
@@ -148,6 +168,8 @@ export class GmailLedgerRepository {
         ) {
           await this.tx([
             this.condition(scope, generation),
+            connectedCondition(this.table, scope),
+            this.activeAttempt(scope, generation),
             {
               ConditionCheck: {
                 TableName: this.table,
@@ -165,6 +187,8 @@ export class GmailLedgerRepository {
         }
         await this.tx([
           this.condition(scope, generation),
+          connectedCondition(this.table, scope),
+          this.activeAttempt(scope, generation),
           {
             Put: {
               TableName: this.table,
@@ -187,6 +211,8 @@ export class GmailLedgerRepository {
       }
     },
     apply: async (scope: PollScope, message: Message, fence: string) => {
+      scope = Object.freeze({ ...scope });
+      message = Object.freeze({ ...message });
       try {
         const generation = fenceValue(fence);
         const k = keys(scope);
@@ -196,17 +222,20 @@ export class GmailLedgerRepository {
           (message.kind !== "eligible" && message.kind !== "excluded")
         )
           return fail();
-        let object: LedgerRecord["object"];
+        // This precheck denies already-disconnected calls. It cannot drain a
+        // write already in flight; the ledger remains inactive until barrier
+        // and lifecycle integration provide that guarantee.
+        await this.tx([
+          this.condition(scope, generation),
+          connectedCondition(this.table, scope),
+          this.activeAttempt(scope, generation),
+        ]);
+        let bytes: Uint8Array | undefined;
         if (message.kind === "eligible") {
           if (typeof message.text !== "string" || !message.text.isWellFormed())
             return fail();
-          const bytes = new TextEncoder().encode(message.text);
+          bytes = new TextEncoder().encode(message.text);
           if (bytes.byteLength > 1024 * 1024) return fail();
-          const digest = hash(bytes);
-          const stored = await this.objects.put(scope.tenantId, digest, bytes);
-          if (stored.sha256 !== digest || stored.size !== bytes.byteLength)
-            return fail();
-          object = { id: digest, size: bytes.byteLength, sha256: digest };
         }
         const key = k.message(message.messageId);
         const [old, sync, checkpoint] = await Promise.all([
@@ -221,6 +250,17 @@ export class GmailLedgerRepository {
             !id(old.configVersion) ||
             (old.kind !== "eligible" && old.kind !== "excluded") ||
             old.messageId !== message.messageId)
+        )
+          return fail();
+        if (
+          old?.contentPurged === true &&
+          (old.active !== false || old.object !== undefined)
+        )
+          return fail();
+        if (
+          old?.kind === "eligible" &&
+          !validObject(old.object) &&
+          old.contentPurged !== true
         )
           return fail();
         if (
@@ -249,25 +289,43 @@ export class GmailLedgerRepository {
           old.configVersion !== sync?.configVersion
         )
           return fail();
-        if (
-          old &&
-          BigInt(old.revision as string) === BigInt(message.revision)
-        ) {
+        const sameRevision =
+          old && BigInt(old.revision as string) === BigInt(message.revision);
+        if (old && sameRevision) {
           const changedSelection =
             seen !== undefined && old.configVersion !== sync?.configVersion;
           if (
             (old.kind !== message.kind && !changedSelection) ||
             (old.kind === "eligible" &&
+              old.contentPurged !== true &&
               message.kind === "eligible" &&
               (!old.object ||
                 typeof old.object !== "object" ||
-                (old.object as Record<string, unknown>).id !== object?.id ||
-                (old.object as Record<string, unknown>).size !== object?.size ||
+                (old.object as Record<string, unknown>).size !==
+                  bytes?.byteLength ||
                 (old.object as Record<string, unknown>).sha256 !==
-                  object?.sha256))
+                  hash(bytes!)))
           )
             return fail();
         }
+        const retained =
+          old?.kind === "eligible" &&
+          sameRevision &&
+          message.kind === "eligible" &&
+          old.contentPurged !== true
+            ? old.object
+            : undefined;
+        const purged =
+          old?.contentPurged === true &&
+          sameRevision &&
+          message.kind === "eligible";
+        const retiring =
+          old &&
+          validObject(old.object) &&
+          (message.kind === "excluded" || !sameRevision) &&
+          !older
+            ? this.processingReleased(scope, (old.object as { id: string }).id)
+            : undefined;
         const item = older
           ? {
               ...old,
@@ -279,17 +337,55 @@ export class GmailLedgerRepository {
               messageId: message.messageId,
               revision: message.revision,
               kind: message.kind,
-              active: message.kind === "eligible",
+              active: message.kind === "eligible" && !purged,
               origin: "gmail",
               externalProcessing: "not_authorized",
-              ...(object ? { object } : {}),
+              ...(retained ? { object: retained } : {}),
+              ...(purged ? { contentPurged: true } : {}),
               ...(seen === undefined ? {} : { seen }),
               configVersion: currentConfig,
               generation: old ? (old.generation as number) + 1 : 1,
             };
         if (!Number.isSafeInteger(item.generation)) return fail();
+        if (message.kind === "eligible" && !older && !retained && !purged) {
+          const objectId = `go_${randomUUID().replaceAll("-", "")}`;
+          await this.objects.writeAndPublish(
+            scope,
+            fence,
+            objectId,
+            bytes!,
+            (reference) => [
+              this.activeAttempt(scope, generation),
+              ...(retiring ? [retiring] : []),
+              {
+                Put: {
+                  TableName: this.table,
+                  Item: { ...item, object: reference },
+                  ConditionExpression: old
+                    ? "#generation = :previous"
+                    : "attribute_not_exists(pk)",
+                  ...(old
+                    ? {
+                        ExpressionAttributeNames: {
+                          "#generation": "generation",
+                        },
+                        ExpressionAttributeValues: {
+                          ":previous": old.generation,
+                        },
+                      }
+                    : {}),
+                },
+              },
+            ],
+            message.messageId,
+          );
+          return;
+        }
         await this.tx([
           this.condition(scope, generation),
+          connectedCondition(this.table, scope),
+          this.activeAttempt(scope, generation),
+          ...(retiring ? [retiring] : []),
           {
             Put: {
               TableName: this.table,
@@ -315,6 +411,7 @@ export class GmailLedgerRepository {
       config: PollConfig,
       fence: string,
     ) => {
+      scope = Object.freeze({ ...scope });
       try {
         const generation = fenceValue(fence);
         const k = keys(scope);
@@ -340,7 +437,11 @@ export class GmailLedgerRepository {
         )
           return fail();
         if (sync.status === "complete") {
-          await this.tx([this.condition(scope, generation)]);
+          await this.tx([
+            this.condition(scope, generation),
+            connectedCondition(this.table, scope),
+            this.activeAttempt(scope, generation),
+          ]);
           return;
         }
         if (sync.status !== "active") return fail();
@@ -369,7 +470,15 @@ export class GmailLedgerRepository {
               typeof record.active !== "boolean" ||
               (record.kind !== "eligible" && record.kind !== "excluded") ||
               (record.active && record.kind !== "eligible") ||
-              (record.kind === "eligible" && !validObject(record.object)) ||
+              (record.contentPurged === true &&
+                (record.active !== false || record.object !== undefined)) ||
+              (record.kind === "eligible" &&
+                !validObject(record.object) &&
+                !(
+                  record.active === false &&
+                  record.contentPurged === true &&
+                  record.object === undefined
+                )) ||
               !id(record.configVersion) ||
               record.pk !== k.pk ||
               record.sk !== k.message(record.messageId as string).sk ||
@@ -382,6 +491,12 @@ export class GmailLedgerRepository {
               return fail();
             await this.tx([
               this.condition(scope, generation),
+              connectedCondition(this.table, scope),
+              this.activeAttempt(scope, generation),
+              this.processingReleased(
+                scope,
+                (record.object as { id: string }).id,
+              ),
               checkSync(),
               {
                 Update: {
@@ -404,6 +519,8 @@ export class GmailLedgerRepository {
         } while (cursor);
         await this.tx([
           this.condition(scope, generation),
+          connectedCondition(this.table, scope),
+          this.activeAttempt(scope, generation),
           {
             Update: {
               TableName: this.table,

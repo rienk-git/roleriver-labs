@@ -1,3 +1,6 @@
+import { GmailObjectLifecycle } from "./gmail-objects.js";
+import { GmailHoldRepository } from "./gmail-holds.js";
+import { GmailConnectionRepository } from "./gmail-connection.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,6 +12,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import {
   QueryCommand,
+  GetCommand,
   TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
@@ -17,6 +21,7 @@ import { describe, expect, it } from "vitest";
 import { createLocalClient } from "./dynamodb.js";
 import { GmailLedgerRepository } from "./gmail-ledger.js";
 import { GmailStateRepository } from "./gmail-state.js";
+import { GmailAttemptRepository } from "./gmail-attempt.js";
 import { LocalObjectStore } from "./object-store.js";
 import type { PollScope } from "../source-gmail/poll.js";
 
@@ -59,8 +64,48 @@ describe("Gmail ledger with DynamoDB Local", () => {
       );
       const objects = await LocalObjectStore.open(dir);
       const state = new GmailStateRepository(client, table, 60000);
-      const ledger = new GmailLedgerRepository(client, table, objects).ledger;
+      const attempts = new GmailAttemptRepository(client, table);
+      const lifecycle = new GmailObjectLifecycle(client, table, objects, {
+        exclusive: async <T>(_tenant: string, task: () => Promise<T>) => task(),
+      });
+      const ledger = new GmailLedgerRepository(client, table, lifecycle).ledger;
+      const holds = new GmailHoldRepository(client, table);
+      const retain = async (
+        owner: PollScope,
+        messageId: string,
+        fence: string,
+      ) => {
+        const hash = (value: string) =>
+          createHash("sha256").update(value).digest("hex");
+        const key = {
+          pk: `gmail#${hash(JSON.stringify([owner.tenantId, owner.connectionId]))}`,
+          sk: `ledger#${hash(owner.sourceId)}#message#${hash(messageId)}`,
+        };
+        const row = (
+          await client.send(
+            new GetCommand({
+              TableName: table,
+              Key: key,
+              ConsistentRead: true,
+            }),
+          )
+        ).Item!;
+        await holds.add(
+          owner,
+          row.object.id,
+          { kind: "role", id: "retained" },
+          fence,
+        );
+        await holds.release(
+          owner,
+          row.object.id,
+          { kind: "processing", id: "initial" },
+          fence,
+        );
+      };
+      await new GmailConnectionRepository(client, table).initialize(scope);
       const fence = (await state.lease.acquire(scope))!.fence;
+      await attempts.begin(scope, fence, "full");
       await ledger.beginFullSync(scope, config, fence);
       await ledger.apply(
         scope,
@@ -72,6 +117,7 @@ describe("Gmail ledger with DynamoDB Local", () => {
         },
         fence,
       );
+      await retain(scope, "first", fence);
       await ledger.apply(
         scope,
         {
@@ -82,10 +128,12 @@ describe("Gmail ledger with DynamoDB Local", () => {
         },
         fence,
       );
+      await retain(scope, "second", fence);
       await ledger.finishFullSync(scope, config, fence);
       await ledger.finishFullSync(scope, config, fence);
       await state.lease.release(scope, fence);
       const next = (await state.lease.acquire(scope))!.fence;
+      await attempts.begin(scope, next, "full");
       await expect(
         ledger.beginFullSync(scope, config, fence),
       ).rejects.toThrow();
@@ -105,9 +153,7 @@ describe("Gmail ledger with DynamoDB Local", () => {
         ),
       ).rejects.toThrow("Gmail ledger operation failed");
       const orphanId = createHash("sha256").update("Synthetic").digest("hex");
-      expect(
-        Buffer.from((await objects.get(scope.tenantId, orphanId))!).toString(),
-      ).toBe("Synthetic");
+      expect(await objects.get(scope.tenantId, orphanId)).toBeNull();
       await ledger.beginFullSync(scope, config, next);
       await ledger.apply(
         scope,
@@ -119,6 +165,7 @@ describe("Gmail ledger with DynamoDB Local", () => {
         },
         next,
       );
+      await retain(scope, "stale", next);
       await ledger.apply(
         scope,
         {
@@ -132,6 +179,7 @@ describe("Gmail ledger with DynamoDB Local", () => {
       // Crash during full scan: the new fence restarts the seen set before retiring records.
       await state.lease.release(scope, next);
       const restart = (await state.lease.acquire(scope))!.fence;
+      await attempts.begin(scope, restart, "full");
       await ledger.beginFullSync(scope, config, restart);
       await ledger.apply(
         scope,
@@ -187,6 +235,7 @@ describe("Gmail ledger with DynamoDB Local", () => {
       expect(await objects.get("tenant-b", second.object.id)).toBeNull();
       await state.lease.release(scope, restart);
       const changed = (await state.lease.acquire(scope))!.fence;
+      await attempts.begin(scope, changed, "full");
       await ledger.beginFullSync(scope, { ...config, version: "v2" }, changed);
       await ledger.apply(
         scope,
@@ -195,15 +244,15 @@ describe("Gmail ledger with DynamoDB Local", () => {
       );
       await ledger.finishFullSync(scope, { ...config, version: "v2" }, changed);
       expect(
-        await state.checkpoints.compareAndSet(
-          scope,
-          null,
-          { historyId: "10", configVersion: "v2", revision: 1 },
-          changed,
-        ),
+        await attempts.publish(scope, changed, null, {
+          historyId: "10",
+          configVersion: "v2",
+          revision: 1,
+        }),
       ).toBe(true);
       await state.lease.release(scope, changed);
       const retry = (await state.lease.acquire(scope))!.fence;
+      await attempts.begin(scope, retry, "full");
       await expect(
         ledger.apply(
           scope,
@@ -218,7 +267,9 @@ describe("Gmail ledger with DynamoDB Local", () => {
       ).rejects.toThrow();
       await state.lease.release(scope, retry);
       const tenantB = { ...scope, tenantId: "tenant-b" };
+      await new GmailConnectionRepository(client, table).initialize(tenantB);
       const bFence = (await state.lease.acquire(tenantB))!.fence;
+      await attempts.begin(tenantB, bFence, "full");
       await ledger.beginFullSync(tenantB, config, bFence);
       await ledger.apply(
         tenantB,
@@ -236,6 +287,7 @@ describe("Gmail ledger with DynamoDB Local", () => {
       // Force a crash after one retirement and then repeat across more than one query page.
       const scope3 = { ...scope, sourceId: "large" };
       const initial = (await state.lease.acquire(scope3))!.fence;
+      await attempts.begin(scope3, initial, "full");
       await ledger.beginFullSync(scope3, config, initial);
       for (let index = 0; index < 101; index++) {
         await ledger.apply(
@@ -248,10 +300,12 @@ describe("Gmail ledger with DynamoDB Local", () => {
           },
           initial,
         );
+        await retain(scope3, `message${index}`, initial);
       }
       await ledger.finishFullSync(scope3, config, initial);
       await state.lease.release(scope3, initial);
       const partial = (await state.lease.acquire(scope3))!.fence;
+      await attempts.begin(scope3, partial, "full");
       await ledger.beginFullSync(scope3, config, partial);
       let failOnce = true;
       const faultClient = new Proxy(client, {
@@ -275,13 +329,14 @@ describe("Gmail ledger with DynamoDB Local", () => {
           };
         },
       }) as DynamoDBDocumentClient;
-      const faulty = new GmailLedgerRepository(faultClient, table, objects)
+      const faulty = new GmailLedgerRepository(faultClient, table, lifecycle)
         .ledger;
       await expect(
         faulty.finishFullSync(scope3, config, partial),
       ).rejects.toThrow();
       await state.lease.release(scope3, partial);
       const resumed = (await state.lease.acquire(scope3))!.fence;
+      await attempts.begin(scope3, resumed, "full");
       await ledger.beginFullSync(scope3, config, resumed);
       await ledger.finishFullSync(scope3, config, resumed);
       const largeRows = (
@@ -305,6 +360,7 @@ describe("Gmail ledger with DynamoDB Local", () => {
 
       // A seen record with a missing content reference must not be silently accepted.
       const damaged = (await state.lease.acquire(scope3))!.fence;
+      await attempts.begin(scope3, damaged, "full");
       await ledger.beginFullSync(scope3, config, damaged);
       await ledger.apply(
         scope3,

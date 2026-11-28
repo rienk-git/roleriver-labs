@@ -27,6 +27,10 @@ export interface GoogleOAuthOptions {
   clientSecret?: string;
   redirectUri: string;
   fetcher: typeof fetch;
+  /** Must hold the same tenant barrier and check the connection until the request drains. */
+  gate: { run<T>(operation: () => Promise<T>): Promise<T> };
+  /** Durably mark issuance ambiguous before exposing an authorization URL or exchanging a code. */
+  exchangeStarted(): Promise<void>;
   /** Must enforce the application's source policy before each request. */
   allow: (url: string) => boolean | Promise<boolean>;
   timeoutMs?: number;
@@ -78,72 +82,69 @@ export function createGoogleOAuth(options: GoogleOAuthOptions) {
     params: URLSearchParams,
   ): Promise<unknown> {
     try {
-      if (!(await options.allow(endpoint)))
-        throw new GmailOAuthError("policy_denied");
-      const controller = new AbortController();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const deadline = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          controller.abort();
-          reject(new GmailOAuthError("provider_error"));
-        }, timeout);
-      });
-      let text: string;
-      let result: Response;
-      try {
-        result = await Promise.race([
-          options.fetcher(endpoint, {
+      return await options.gate.run(async () => {
+        if (!(await options.allow(endpoint)))
+          throw new GmailOAuthError("policy_denied");
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeout);
+        let text: string;
+        let result: Response;
+        try {
+          result = await options.fetcher(endpoint, {
             method: "POST",
             body: params,
             redirect: "error",
             signal: controller.signal,
             headers: { "content-type": "application/x-www-form-urlencoded" },
-          }),
-          deadline,
-        ]);
-        const read = async () => {
-          if (!result.body) return "";
-          const reader = result.body.getReader();
-          const chunks: Uint8Array[] = [];
-          let size = 0;
-          try {
-            while (true) {
-              const item = await reader.read();
-              if (item.done) break;
-              size += item.value.length;
-              if (size > 65536) {
-                controller.abort();
-                throw new GmailOAuthError("provider_error");
+          });
+          const read = async () => {
+            if (!result.body) return "";
+            const reader = result.body.getReader();
+            const chunks: Uint8Array[] = [];
+            let size = 0;
+            try {
+              while (true) {
+                const item = await reader.read();
+                if (item.done) break;
+                size += item.value.length;
+                if (size > 65536) {
+                  controller.abort();
+                  throw new GmailOAuthError("provider_error");
+                }
+                chunks.push(item.value);
               }
-              chunks.push(item.value);
+              return Buffer.concat(chunks).toString("utf8");
+            } catch (error) {
+              controller.abort();
+              await reader.cancel().catch(() => undefined);
+              throw error;
+            } finally {
+              reader.releaseLock();
             }
-            return Buffer.concat(chunks).toString("utf8");
-          } finally {
-            reader.releaseLock();
-          }
-        };
-        text = await Promise.race([read(), deadline]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-      let body: unknown;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        body = null;
-      }
-      if (!result.ok) {
-        if (
-          endpoint === TOKEN_URL &&
-          typeof body === "object" &&
-          body !== null &&
-          "error" in body &&
-          body.error === "invalid_grant"
-        )
-          throw new GmailOAuthError("reconnect_required");
-        throw new GmailOAuthError("provider_error");
-      }
-      return body;
+          };
+          text = await read();
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = null;
+        }
+        if (!result.ok) {
+          if (
+            endpoint === TOKEN_URL &&
+            typeof body === "object" &&
+            body !== null &&
+            "error" in body &&
+            body.error === "invalid_grant"
+          )
+            throw new GmailOAuthError("reconnect_required");
+          throw new GmailOAuthError("provider_error");
+        }
+        return body;
+      });
     } catch (error) {
       if (error instanceof GmailOAuthError) throw error;
       throw new GmailOAuthError("provider_error");
@@ -180,7 +181,14 @@ export function createGoogleOAuth(options: GoogleOAuthOptions) {
     };
   }
   return {
-    authorizationUrl: url.href,
+    async authorizationUrl(): Promise<string> {
+      try {
+        await options.exchangeStarted();
+      } catch {
+        throw new GmailOAuthError("provider_error");
+      }
+      return url.href;
+    },
     async complete(callbackUrl: string): Promise<GoogleTokens> {
       if (used || Date.now() > expires)
         throw new GmailOAuthError("invalid_callback");
@@ -214,10 +222,20 @@ export function createGoogleOAuth(options: GoogleOAuthOptions) {
         redirect_uri: options.redirectUri,
         grant_type: "authorization_code",
       });
+      try {
+        await options.exchangeStarted();
+      } catch {
+        throw new GmailOAuthError("provider_error");
+      }
       return parseTokens(await request(TOKEN_URL, body));
     },
     async refresh(refreshToken: string): Promise<GoogleTokens> {
       if (!refreshToken) throw new GmailOAuthError("reconnect_required");
+      try {
+        await options.exchangeStarted();
+      } catch {
+        throw new GmailOAuthError("provider_error");
+      }
       return parseTokens(
         await request(
           TOKEN_URL,

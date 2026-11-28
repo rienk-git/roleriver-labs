@@ -69,6 +69,8 @@ export interface RateLimiter {
   }): Promise<boolean>;
 }
 export interface SourcePolicyGate {
+  /** Validate permission without consuming a rate permit; not authorization to dispatch. */
+  check(request: AccessRequest): Promise<Decision>;
   authorize(request: AccessRequest): Promise<Decision>;
   dispatch<T>(
     request: AccessRequest,
@@ -115,15 +117,23 @@ function linkedIn(hostname: string): boolean {
  * Config is trusted project policy, never vacancy text or model output. Each network
  * request (including redirects and authenticated session use) needs a new decision.
  * This gate does not replace DNS/IP SSRF checks in the network adapter.
+ * For live revocation, provide a synchronous trusted config loader; a static
+ * config is cloned at creation and will not observe later changes. Keep the
+ * same limiter when loading newer policy so limits do not reset.
  */
 export function createSourcePolicyGate(
   config: unknown,
   clock: () => Date,
   limiter: RateLimiter,
 ): SourcePolicyGate {
-  const parsed = configSchema.safeParse(config);
-  const sources = parsed.success ? parsed.data.sources : [];
-  async function authorize(request: AccessRequest): Promise<Decision> {
+  // Static configs are cloned once; an explicit loader is required for live policy changes.
+  const staticConfig =
+    typeof config === "function" ? undefined : configSchema.safeParse(config);
+  async function decide(
+    request: AccessRequest,
+    consume: boolean,
+    fixedSnapshot?: ReturnType<typeof configSchema.safeParse>,
+  ): Promise<Decision> {
     const validated = z
       .strictObject({
         sourceId: z.string(),
@@ -133,7 +143,17 @@ export function createSourcePolicyGate(
       .safeParse(request);
     if (!validated.success) return { allowed: false, reason: "policy_denied" };
     request = validated.data;
-    const source = sources.find((item) => item.id === request.sourceId);
+    let parsed = fixedSnapshot ?? staticConfig;
+    if (!parsed) {
+      try {
+        parsed = configSchema.safeParse((config as () => unknown)());
+      } catch {
+        return { allowed: false, reason: "policy_denied" };
+      }
+    }
+    const source = parsed.success
+      ? parsed.data.sources.find((item) => item.id === request.sourceId)
+      : undefined;
     const capability = source?.methods[request.method];
     let current: Date;
     try {
@@ -177,6 +197,7 @@ export function createSourcePolicyGate(
       )
         return { allowed: false, reason: "policy_denied" };
     }
+    if (!consume) return { allowed: true };
     try {
       const ok = await limiter.consume({
         key: JSON.stringify([source.id, request.method]),
@@ -184,17 +205,34 @@ export function createSourcePolicyGate(
         windowMs: capability.rateLimit.windowMs,
         now: new Date(current.getTime()),
       });
-      return ok === true
-        ? { allowed: true }
-        : { allowed: false, reason: "rate_limited" };
+      if (ok !== true) return { allowed: false, reason: "rate_limited" };
+      // The limiter can wait while permission or expiry changes. A permit is
+      // discarded if a fresh check no longer allows the request.
+      const latestValue =
+        typeof config === "function" ? (config as () => unknown)() : undefined;
+      const latest = staticConfig ?? configSchema.safeParse(latestValue);
+      const fresh = await decide(request, false, latest);
+      if (!fresh.allowed) return fresh;
+      const latestCapability = latest.success
+        ? latest.data.sources.find((item) => item.id === request.sourceId)
+            ?.methods[request.method]
+        : undefined;
+      if (
+        !latestCapability ||
+        latestCapability.rateLimit.requests !== capability.rateLimit.requests ||
+        latestCapability.rateLimit.windowMs !== capability.rateLimit.windowMs
+      )
+        return { allowed: false, reason: "policy_denied" };
+      return { allowed: true };
     } catch {
       return { allowed: false, reason: "rate_limited" };
     }
   }
   return {
-    authorize,
+    check: (request) => decide(request, false),
+    authorize: (request) => decide(request, true),
     async dispatch<T>(request: AccessRequest, action: () => Promise<T>) {
-      const decision = await authorize(request);
+      const decision = await decide(request, true);
       if (!decision.allowed) return decision;
       return { allowed: true, value: await action() };
     },
