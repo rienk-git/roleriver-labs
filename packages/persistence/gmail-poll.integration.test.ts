@@ -1,3 +1,5 @@
+import { GmailObjectLifecycle } from "./gmail-objects.js";
+import { GmailConnectionRepository } from "./gmail-connection.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +14,8 @@ import { pollGmail, type PollDependencies } from "../source-gmail/poll.js";
 import { createLocalClient } from "./dynamodb.js";
 import { GmailLedgerRepository } from "./gmail-ledger.js";
 import { GmailStateRepository } from "./gmail-state.js";
+import { GmailAttemptRepository } from "./gmail-attempt.js";
+import { GmailConfigRepository } from "./gmail-config.js";
 import { LocalObjectStore } from "./object-store.js";
 
 describe("Gmail polling persistence integration", () => {
@@ -47,15 +51,21 @@ describe("Gmail polling persistence integration", () => {
       created = true;
       const objects = await LocalObjectStore.open(root);
       const state = new GmailStateRepository(document, table, 30000);
-      const ledger = new GmailLedgerRepository(document, table, objects);
+      const lifecycle = new GmailObjectLifecycle(document, table, objects, {
+        exclusive: async <T>(_tenant: string, task: () => Promise<T>) => task(),
+      });
+      const ledger = new GmailLedgerRepository(document, table, lifecycle);
+      const attempts = new GmailAttemptRepository(document, table);
+      const claims = new GmailConfigRepository(document, table);
       const scope = {
         tenantId: "tenant",
         connectionId: "connection",
         sourceId: "source",
       };
+      await new GmailConnectionRepository(document, table).initialize(scope);
       const config = { version: "v1", query: "", labelIds: [] };
       const deps: PollDependencies = {
-        policy: { authorize: async () => true },
+        policy: { check: async () => true },
         client: {
           watermark: async () => "10",
           list: async () => ({ messageIds: ["message"], nextPageToken: null }),
@@ -72,14 +82,24 @@ describe("Gmail polling persistence integration", () => {
           }),
         },
         lease: state.lease,
-        checkpoints: { ...state.checkpoints, compareAndSet: async () => false },
+        checkpoints: state.checkpoints,
+        claims,
+        attempts: {
+          isInitialized: attempts.isInitialized.bind(attempts),
+          begin: attempts.begin.bind(attempts),
+          publish: async () => false,
+        },
         ledger: ledger.ledger,
       };
       expect(await pollGmail(scope, config, deps)).toEqual({
         status: "checkpoint_conflict",
       });
       expect(await state.checkpoints.load(scope)).toBeNull();
-      deps.checkpoints = state.checkpoints;
+      deps.attempts = {
+        isInitialized: attempts.isInitialized.bind(attempts),
+        begin: attempts.begin.bind(attempts),
+        publish: attempts.publish.bind(attempts),
+      };
       expect(await pollGmail(scope, config, deps)).toEqual({
         status: "completed",
         mode: "full",

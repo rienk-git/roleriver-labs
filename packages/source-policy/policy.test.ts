@@ -35,6 +35,64 @@ const request = {
 };
 
 describe("source access policy", () => {
+  it("fully validates one final policy snapshot after the limiter settles", async () => {
+    let loads = 0;
+    const gate = createSourcePolicyGate(
+      () => (++loads <= 2 ? config : { sources: [] }),
+      () => now,
+      { consume: async () => true },
+    );
+    expect(await gate.authorize(request)).toEqual({ allowed: true });
+    expect(loads).toBe(2);
+  });
+  it("discards a permit when policy changes during rate limiting", async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let current: unknown = config;
+    const gate = createSourcePolicyGate(
+      () => current,
+      () => now,
+      {
+        consume: async () => {
+          started();
+          await resume;
+          return true;
+        },
+      },
+    );
+    const authorization = gate.authorize(request);
+    await waiting;
+    current = { sources: [] };
+    release();
+    expect(await authorization).toEqual({
+      allowed: false,
+      reason: "policy_denied",
+    });
+  });
+  it("preflights the same permission checks without consuming a permit", async () => {
+    const { gate, limiter } = setup();
+    expect(await gate.check(request)).toEqual({ allowed: true });
+    expect(
+      (await gate.check({ ...request, sourceId: "unknown" })).allowed,
+    ).toBe(false);
+    expect(
+      (
+        await gate.check({
+          ...request,
+          targetUrl: "https://other.example.test/",
+        })
+      ).allowed,
+    ).toBe(false);
+    expect(limiter.consume).not.toHaveBeenCalled();
+    expect((await gate.authorize(request)).allowed).toBe(true);
+    expect(limiter.consume).toHaveBeenCalledTimes(1);
+  });
   it("allows only the explicit method and exact permitted host", async () => {
     const { gate } = setup();
     expect((await gate.authorize(request)).allowed).toBe(true);

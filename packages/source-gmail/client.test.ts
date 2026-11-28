@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { createGmailClient } from "./client.js";
+import { GmailCredentialRemediationRequired } from "./refresh.js";
 
 const scope = { tenantId: "t", connectionId: "c", sourceId: "gmail" };
 const config = { version: "v1", query: "", labelIds: ["INBOX"] };
+const gate = {
+  run: async <T>(_scope: typeof scope, operation: () => Promise<T>) =>
+    operation(),
+};
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status });
 function setup(responses: Response[]) {
@@ -11,6 +16,8 @@ function setup(responses: Response[]) {
   const token = vi.fn(async () => "synthetic-token");
   const client = createGmailClient({
     fetch: fetcher,
+    gate,
+    check: async () => true,
     authorize,
     accessToken: token,
   });
@@ -18,6 +25,22 @@ function setup(responses: Response[]) {
 }
 
 describe("Gmail HTTP client", () => {
+  it("propagates sanitized credential remediation without dispatching", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const client = createGmailClient({
+      fetch: fetcher,
+      gate,
+      check: async () => true,
+      authorize: async () => true,
+      accessToken: async () => {
+        throw new GmailCredentialRemediationRequired();
+      },
+    });
+    await expect(client.watermark(scope)).rejects.toMatchObject({
+      code: "manual_remediation_required",
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it("checks policy and issues a fixed, redirect-disabled request", async () => {
     const { client, fetcher, authorize } = setup([json({ historyId: "123" })]);
     expect(await client.watermark(scope)).toBe("123");
@@ -36,12 +59,74 @@ describe("Gmail HTTP client", () => {
     const token = vi.fn();
     const client = createGmailClient({
       fetch: fetcher,
+      gate,
       accessToken: token,
-      authorize: async () => false,
+      check: async () => false,
+      authorize: async () => true,
     });
     await expect(client.watermark(scope)).rejects.toThrow();
     expect(token).not.toHaveBeenCalled();
     expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("does not dispatch if the connection gate denies", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const token = vi.fn(async () => "synthetic-token");
+    const client = createGmailClient({
+      fetch: fetcher,
+      accessToken: token,
+      check: async () => true,
+      authorize: async () => true,
+      gate: {
+        run: async () => {
+          throw new Error("disconnected");
+        },
+      },
+    });
+    await expect(client.watermark(scope)).rejects.toThrow();
+    expect(token).toHaveBeenCalledOnce();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("keeps the dispatch gate held until oversized response cancellation finishes", async () => {
+    let cancelStarted!: () => void;
+    let finishCancel!: () => void;
+    const started = new Promise<void>((resolve) => {
+      cancelStarted = resolve;
+    });
+    const cancelled = new Promise<void>((resolve) => {
+      finishCancel = resolve;
+    });
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(2 * 1024 * 1024 + 1));
+      },
+      async cancel() {
+        cancelStarted();
+        await cancelled;
+      },
+    });
+    let gateReleased = false;
+    const client = createGmailClient({
+      fetch: async () => new Response(stream),
+      accessToken: async () => "synthetic",
+      check: async () => true,
+      authorize: async () => true,
+      gate: {
+        run: async <T>(_scope: typeof scope, operation: () => Promise<T>) => {
+          try {
+            return await operation();
+          } finally {
+            gateReleased = true;
+          }
+        },
+      },
+    });
+    const request = client.watermark(scope);
+    const result = request.catch(() => undefined);
+    await started;
+    expect(gateReleased).toBe(false);
+    finishCancel();
+    await result;
+    expect(gateReleased).toBe(true);
   });
   it("encodes listing parameters and parses history changes", async () => {
     const { client, fetcher } = setup([
@@ -108,9 +193,7 @@ describe("Gmail HTTP client", () => {
       text: "hello",
     });
     const requested = new URL(fetcher.mock.calls[0]![0] as string);
-    expect(requested.searchParams.get("fields")).toBe(
-      "id,historyId,labelIds,payload(mimeType,filename)",
-    );
+    expect(requested.searchParams.get("fields")).not.toContain("body(data");
     expect(requested.searchParams.get("format")).toBe("full");
     expect(
       new URL(fetcher.mock.calls[1]![0] as string).searchParams.get("format"),
@@ -175,6 +258,127 @@ describe("Gmail HTTP client", () => {
     });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it("does not fetch multipart data even for a single plain text branch", async () => {
+    const part = { mimeType: "text/plain", filename: "" };
+    const envelope = { id: "a", historyId: "1", labelIds: ["INBOX"] };
+    const { client, fetcher, authorize } = setup([
+      json({
+        ...envelope,
+        payload: { mimeType: "multipart/alternative", parts: [part] },
+      }),
+      json({
+        ...envelope,
+        payload: {
+          mimeType: "multipart/alternative",
+          parts: [{ ...part, body: { data: "aGVsbG8" } }],
+        },
+      }),
+    ]);
+    expect(await client.reconcile(scope, "a", config)).toEqual({
+      kind: "unknown",
+      messageId: "a",
+    });
+    expect(authorize).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(
+      new URL(fetcher.mock.calls[0]![0] as string).searchParams.get("fields"),
+    ).not.toContain("body(data");
+    expect(
+      fetcher.mock.calls.every(
+        ([url]) => !String(url).includes("/attachments/"),
+      ),
+    ).toBe(true);
+  });
+  it.each([
+    {
+      mimeType: "multipart/alternative",
+      parts: [{ mimeType: "text/plain" }, { mimeType: "text/html" }],
+    },
+    {
+      mimeType: "multipart/mixed",
+      parts: [
+        { mimeType: "text/plain" },
+        { mimeType: "application/pdf", filename: "a.pdf" },
+      ],
+    },
+    {
+      mimeType: "text/plain",
+      headers: [{ name: "Content-Disposition", value: "attachment" }],
+    },
+    {
+      mimeType: "multipart/mixed",
+      parts: [
+        {
+          mimeType: "text/plain",
+          headers: [{ name: "Content-Disposition", value: "attachment" }],
+        },
+      ],
+    },
+    { mimeType: "text/plain", body: { attachmentId: "attachment" } },
+    {
+      mimeType: "text/plain",
+      headers: [
+        { name: "Content-Type", value: "text/plain; charset=iso-8859-1" },
+      ],
+    },
+    {
+      mimeType: "text/plain",
+      headers: [
+        {
+          name: "Content-Type",
+          value: "text/plain; charset=utf-8; charset=us-ascii",
+        },
+      ],
+    },
+  ])("does not fetch ambiguous or attachment bodies", async (payload) => {
+    const { client, fetcher } = setup([
+      json({ id: "a", historyId: "1", labelIds: ["INBOX"], payload }),
+    ]);
+    expect(await client.reconcile(scope, "a", config)).toEqual({
+      kind: "unknown",
+      messageId: "a",
+    });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it("does not infer a deletion revision from a missing message", async () => {
+    const { client } = setup([
+      json({
+        historyId: "12",
+        history: [{ messagesDeleted: [{ message: { id: "a" } }] }],
+      }),
+      new Response(null, { status: 404 }),
+    ]);
+    expect(
+      (await client.history({ scope, startHistoryId: "10" })).messageIds,
+    ).toEqual(["a"]);
+    expect(await client.reconcile(scope, "a", config)).toEqual({
+      kind: "unknown",
+      messageId: "a",
+    });
+  });
+  it("rejects non-ASCII bytes declared as US-ASCII", async () => {
+    const payload = {
+      mimeType: "text/plain",
+      headers: [
+        { name: "Content-Type", value: "text/plain; charset=us-ascii" },
+      ],
+    };
+    const envelope = { id: "a", historyId: "1", labelIds: ["INBOX"] };
+    const { client } = setup([
+      json({ ...envelope, payload }),
+      json({
+        ...envelope,
+        payload: {
+          ...payload,
+          body: { data: Buffer.from("é").toString("base64url") },
+        },
+      }),
+    ]);
+    expect(await client.reconcile(scope, "a", config)).toEqual({
+      kind: "unknown",
+      messageId: "a",
+    });
+  });
   it.each([
     {
       historyId: "2",
@@ -233,6 +437,8 @@ describe("Gmail HTTP client", () => {
       .mockResolvedValueOnce(false);
     const client = createGmailClient({
       fetch: fetcher,
+      gate,
+      check: async () => true,
       authorize,
       accessToken: async () => "synthetic-token",
     });

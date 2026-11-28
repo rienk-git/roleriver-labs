@@ -1,3 +1,5 @@
+import { GmailCredentialRemediationRequired } from "./refresh.js";
+
 /** The caller authenticates and authorizes these identifiers independently. */
 export interface PollScope {
   tenantId: string;
@@ -61,9 +63,35 @@ export interface GmailClient {
 }
 
 export interface PollDependencies {
-  /** A trusted central policy gate, evaluated immediately before every Gmail dispatch. */
+  claims: {
+    hasClaim(
+      scope: PollScope,
+      version: string,
+      fence: string,
+    ): Promise<boolean>;
+    claim(
+      scope: PollScope,
+      config: PollConfig,
+      fence: string,
+    ): Promise<{ status: "created" | "existing" | "conflict" }>;
+  };
+  attempts: {
+    isInitialized(scope: PollScope): Promise<boolean>;
+    begin(
+      scope: PollScope,
+      fence: string,
+      mode: "full" | "incremental",
+    ): Promise<void>;
+    publish(
+      scope: PollScope,
+      fence: string,
+      expectedRevision: number | null,
+      next: Checkpoint,
+    ): Promise<boolean>;
+  };
+  /** Non-consuming permission preflight; the HTTP adapter must independently authorize each dispatch. */
   policy: {
-    authorize(
+    check(
       scope: PollScope,
       method: "email",
       host: "gmail.googleapis.com",
@@ -72,13 +100,6 @@ export interface PollDependencies {
   client: GmailClient;
   checkpoints: {
     load(scope: PollScope): Promise<Checkpoint | null>;
-    /** Atomically check both the current fence and expected checkpoint revision. */
-    compareAndSet(
-      scope: PollScope,
-      expectedRevision: number | null,
-      next: Checkpoint,
-      fence: string,
-    ): Promise<boolean>;
   };
   /** Lease acquisition is exclusive per tenant/connection; fence generations must never repeat. */
   lease: {
@@ -123,6 +144,7 @@ export type PollResult =
         | "resync_required"
         | "checkpoint_conflict"
         | "busy"
+        | "manual_remediation_required"
         | "failed";
     };
 
@@ -168,17 +190,21 @@ export async function pollGmail(
   )
     return { status: "failed" };
 
+  // Claims, credentials and all requests use the same immutable scope and selection.
+  scope = Object.freeze({ ...scope });
+  config = Object.freeze({
+    ...config,
+    labelIds: Object.freeze([...config.labelIds]) as unknown as string[],
+  });
+
   let messageCount = 0;
   let activeFence: string | undefined;
   const dispatch = async <T>(fn: () => Promise<T>): Promise<T> => {
     let permitted = false;
     try {
       permitted =
-        (await deps.policy.authorize(
-          scope,
-          "email",
-          "gmail.googleapis.com",
-        )) === true;
+        (await deps.policy.check(scope, "email", "gmail.googleapis.com")) ===
+        true;
     } catch {
       /* deny on policy failure */
     }
@@ -282,6 +308,31 @@ export async function pollGmail(
       previous && previous.configVersion === config.version
         ? "incremental"
         : "full";
+    if (previous && !(await deps.attempts.isInitialized(scope)))
+      return { status: "failed" };
+    if (
+      previous &&
+      !(await deps.claims.hasClaim(scope, previous.configVersion, activeFence))
+    )
+      return { status: "failed" };
+    const claim = await deps.claims.claim(scope, config, activeFence);
+    if (
+      !claim ||
+      (claim.status !== "created" && claim.status !== "existing") ||
+      (previous &&
+        previous.configVersion === config.version &&
+        claim.status === "created")
+    )
+      return { status: "failed" };
+    if (mode === "incremental") {
+      try {
+        await deps.attempts.begin(scope, activeFence, mode);
+      } catch {
+        // A previous attempt may have stopped mid-write. Full recovery is required.
+        mode = "full";
+        await deps.attempts.begin(scope, activeFence, mode);
+      }
+    } else await deps.attempts.begin(scope, activeFence, mode);
     let nextHistoryId: string;
     const full = async (): Promise<string> => {
       const watermark = await dispatch(() => deps.client.watermark(scope));
@@ -302,25 +353,28 @@ export async function pollGmail(
         )
           throw error;
         mode = "full";
+        await deps.attempts.begin(scope, activeFence, mode);
         nextHistoryId = await full();
       }
     } else nextHistoryId = await full();
     if (previous && BigInt(nextHistoryId) < BigInt(previous.historyId))
       return { status: "failed" };
-    const updated = await deps.checkpoints.compareAndSet(
+    const updated = await deps.attempts.publish(
       scope,
+      activeFence,
       previous?.revision ?? null,
       {
         historyId: nextHistoryId,
         configVersion: config.version,
         revision: (previous?.revision ?? 0) + 1,
       },
-      activeFence,
     );
     return updated
       ? { status: "completed", mode }
       : { status: "checkpoint_conflict" };
   } catch (error) {
+    if (error instanceof GmailCredentialRemediationRequired)
+      return { status: "manual_remediation_required" };
     if (error instanceof PolicyDenied) return { status: "policy_denied" };
     if (error instanceof GmailBoundaryError && error.kind === "revoked")
       return { status: "reconnect_required" };

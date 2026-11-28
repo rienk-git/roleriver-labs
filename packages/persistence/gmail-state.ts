@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  TransactWriteCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type {
@@ -54,25 +53,6 @@ function conditional(error: unknown): boolean {
     error instanceof Error && error.name === "ConditionalCheckFailedException"
   );
 }
-function canceled(error: unknown): boolean {
-  if (
-    !(error instanceof Error) ||
-    error.name !== "TransactionCanceledException"
-  )
-    return false;
-  const reasons = (
-    error as Error & { CancellationReasons?: { Code?: string }[] }
-  ).CancellationReasons;
-  return (
-    Array.isArray(reasons) &&
-    reasons.some((reason) => reason.Code === "ConditionalCheckFailed") &&
-    reasons.every(
-      (reason) =>
-        reason.Code === "ConditionalCheckFailed" || reason.Code === "None",
-    )
-  );
-}
-
 /** Durable lease and checkpoint ports. Lease expiry uses the host clock, which must be synchronized.
  * The lease has no renewal; callers must configure a duration long enough for a bounded poll.
  * This adapter does not implement the Gmail ledger or full-sync reconciliation. */
@@ -181,65 +161,6 @@ export class GmailStateRepository {
           revision: value.revision,
         };
       } catch {
-        throw new Error("Gmail state operation failed");
-      }
-    },
-    compareAndSet: async (scope, expected, next, fence) => {
-      const identity = keys(scope);
-      const generation = fenceNumber(fence);
-      if (
-        !validCheckpoint(next) ||
-        (expected !== null &&
-          (!Number.isSafeInteger(expected) || expected < 1)) ||
-        next.revision !== (expected ?? 0) + 1
-      )
-        throw new Error("Invalid checkpoint");
-      try {
-        await this.#client.send(
-          new TransactWriteCommand({
-            TransactItems: [
-              {
-                ConditionCheck: {
-                  TableName: this.#table,
-                  Key: identity.lease,
-                  ConditionExpression:
-                    "#generation = :generation AND #expires > :now",
-                  ExpressionAttributeNames: {
-                    "#generation": "generation",
-                    "#expires": "expiresAt",
-                  },
-                  ExpressionAttributeValues: {
-                    ":generation": generation,
-                    ":now": Date.now(),
-                  },
-                },
-              },
-              {
-                Put: {
-                  TableName: this.#table,
-                  Item: { ...identity.checkpoint, checkpoint: next },
-                  ConditionExpression:
-                    expected === null
-                      ? "attribute_not_exists(pk)"
-                      : "#checkpoint.#revision = :expected",
-                  ...(expected === null
-                    ? {}
-                    : {
-                        ExpressionAttributeNames: {
-                          "#checkpoint": "checkpoint",
-                          "#revision": "revision",
-                        },
-                        ExpressionAttributeValues: { ":expected": expected },
-                      }),
-                },
-              },
-            ],
-          }),
-          { abortSignal: AbortSignal.timeout(5000) },
-        );
-        return true;
-      } catch (error) {
-        if (canceled(error)) return false;
         throw new Error("Gmail state operation failed");
       }
     },

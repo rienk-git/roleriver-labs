@@ -13,6 +13,25 @@ export interface StoredGmailTokens {
   accessToken?: string;
   expiresAt?: number;
 }
+export interface GmailTokenGate {
+  run<T>(
+    tenant: string,
+    connection: string,
+    operation: () => Promise<T>,
+  ): Promise<T>;
+}
+export interface GmailDisconnectedRevocation {
+  tenant: string;
+  connection: string;
+  gate: GmailTokenGate;
+  state(): Promise<"never_issued" | "pending" | "revoked" | "complete">;
+  authorize(): Promise<boolean>;
+  markRevoked(): Promise<void>;
+  markNoIssuance(): Promise<void>;
+  markDeleted(): Promise<void>;
+  fetcher: typeof fetch;
+  timeoutMs?: number;
+}
 const failure = () => new Error("Token storage failed");
 function validTokens(value: unknown): value is StoredGmailTokens {
   if (!value || typeof value !== "object") return false;
@@ -41,16 +60,22 @@ export class EncryptedTokenStore {
   private constructor(
     private readonly directory: string,
     key: Uint8Array,
+    private readonly gate: GmailTokenGate,
+    private readonly revocation?: GmailDisconnectedRevocation,
   ) {
     this.#key = Buffer.from(key);
   }
   static async open(
     directory: string,
     key: Uint8Array,
+    gate: GmailTokenGate,
+    revocation?: GmailDisconnectedRevocation,
   ): Promise<EncryptedTokenStore> {
     try {
       if (
         key.length !== 32 ||
+        !gate ||
+        typeof gate.run !== "function" ||
         typeof process.getuid !== "function" ||
         !constants.O_NOFOLLOW
       )
@@ -64,7 +89,17 @@ export class EncryptedTokenStore {
         (info.mode & 0o077) !== 0
       )
         throw failure();
-      return new EncryptedTokenStore(path, key);
+      if (revocation && (!revocation.tenant || !revocation.connection))
+        throw failure();
+      const bound = revocation
+        ? Object.freeze({
+            ...revocation,
+            gate: Object.freeze({
+              run: revocation.gate.run.bind(revocation.gate),
+            }),
+          })
+        : undefined;
+      return new EncryptedTokenStore(path, key, gate, bound);
     } catch {
       throw failure();
     }
@@ -105,6 +140,21 @@ export class EncryptedTokenStore {
     }
   }
   async put(
+    tenant: string,
+    connection: string,
+    tokens: StoredGmailTokens,
+  ): Promise<void> {
+    if (!validTokens(tokens)) throw failure();
+    const snapshot = Object.freeze({ ...tokens });
+    try {
+      await this.gate.run(tenant, connection, () =>
+        this.putUnsafe(tenant, connection, snapshot),
+      );
+    } catch {
+      throw failure();
+    }
+  }
+  private async putUnsafe(
     tenant: string,
     connection: string,
     tokens: StoredGmailTokens,
@@ -161,6 +211,18 @@ export class EncryptedTokenStore {
     connection: string,
   ): Promise<StoredGmailTokens | null> {
     try {
+      return await this.gate.run(tenant, connection, () =>
+        this.getUnsafe(tenant, connection),
+      );
+    } catch {
+      throw failure();
+    }
+  }
+  private async getUnsafe(
+    tenant: string,
+    connection: string,
+  ): Promise<StoredGmailTokens | null> {
+    try {
       const { path, aad } = this.#location(tenant, connection);
       let file;
       try {
@@ -213,7 +275,70 @@ export class EncryptedTokenStore {
       throw failure();
     }
   }
-  async delete(tenant: string, connection: string): Promise<void> {
+  /** Only the disconnected cleanup gate may expose the refresh token to the fixed Google endpoint. */
+  async revokeAndDelete(tenant: string, connection: string): Promise<void> {
+    const options = this.revocation;
+    if (
+      !options ||
+      tenant !== options.tenant ||
+      connection !== options.connection
+    )
+      throw failure();
+    const timeout = options.timeoutMs ?? 10000;
+    if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30000)
+      throw failure();
+    try {
+      await options.gate.run(tenant, connection, async () => {
+        const state = await options.state();
+        if (state === "complete") {
+          if ((await this.getUnsafe(tenant, connection)) !== null)
+            throw failure();
+          return;
+        }
+        if (state === "never_issued") {
+          if ((await this.getUnsafe(tenant, connection)) !== null)
+            throw failure();
+          await options.markNoIssuance();
+          return;
+        }
+        if (state === "pending") {
+          const tokens = await this.getUnsafe(tenant, connection);
+          if (!tokens || !tokens.refreshToken) throw failure();
+          if ((await options.authorize()) !== true) throw failure();
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeout);
+          try {
+            const response = await options.fetcher(
+              "https://oauth2.googleapis.com/revoke",
+              {
+                method: "POST",
+                headers: {
+                  "content-type": "application/x-www-form-urlencoded",
+                },
+                body: new URLSearchParams({ token: tokens.refreshToken }),
+                redirect: "error",
+                signal: controller.signal,
+              },
+            );
+            // Hold the cleanup gate until the response body has stopped.
+            if (response.body) await response.body.cancel();
+            if (response.status !== 200) throw failure();
+          } finally {
+            clearTimeout(timer);
+          }
+          await options.markRevoked();
+        } else if (state !== "revoked") throw failure();
+        await this.deleteUnsafe(tenant, connection);
+        await options.markDeleted();
+      });
+    } catch {
+      throw failure();
+    }
+  }
+  private async deleteUnsafe(
+    tenant: string,
+    connection: string,
+  ): Promise<void> {
     try {
       const { path } = this.#location(tenant, connection);
       try {

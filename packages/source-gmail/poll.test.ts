@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { GmailCredentialRemediationRequired } from "./refresh.js";
 import {
   pollGmail,
   GmailBoundaryError,
@@ -26,7 +27,7 @@ function setup(
 ) {
   let checkpoint = initial;
   const seen = new Set<string>();
-  const policy = { authorize: vi.fn(async () => true) };
+  const policy = { check: vi.fn(async () => true) };
   const client: GmailClient = {
     watermark: vi.fn(async () => "100"),
     list: vi.fn(async () => ({ messageIds: ["m1"], nextPageToken: null })),
@@ -44,11 +45,6 @@ function setup(
   };
   const checkpoints = {
     load: vi.fn(async () => checkpoint),
-    compareAndSet: vi.fn(async (_scope, expected, next) => {
-      if ((checkpoint?.revision ?? null) !== expected) return false;
-      checkpoint = next;
-      return true;
-    }),
   } satisfies PollDependencies["checkpoints"];
   const lease = {
     acquire: vi.fn(async (): Promise<{ fence: string } | null> => ({
@@ -63,17 +59,72 @@ function setup(
       seen.add(`${item.messageId}:${item.revision}`);
     }),
   };
+  const claims = {
+    hasClaim: vi.fn(async () => true),
+    claim: vi.fn(
+      async (): Promise<{ status: "created" | "existing" | "conflict" }> => ({
+        status: initial ? "existing" : "created",
+      }),
+    ),
+  };
+  const attempts = {
+    isInitialized: vi.fn(async () => true),
+    begin: vi.fn(async () => {}),
+    publish: vi.fn(async (_scope, _fence, expected, next) => {
+      if ((checkpoint?.revision ?? null) !== expected) return false;
+      checkpoint = next;
+      return true;
+    }),
+  };
   const deps = {
     policy,
     client,
     checkpoints,
     lease,
     ledger,
+    claims,
+    attempts,
   } satisfies PollDependencies;
   return { deps, seen, getCheckpoint: () => checkpoint };
 }
 
 describe("Gmail polling boundary", () => {
+  it("returns a sanitized remediation status when issued credentials cannot be secured", async () => {
+    const { deps } = setup();
+    vi.mocked(deps.client.watermark).mockRejectedValue(
+      new GmailCredentialRemediationRequired(),
+    );
+    expect(await pollGmail(scope, config, deps)).toEqual({
+      status: "manual_remediation_required",
+    });
+  });
+  it("rejects unverified legacy checkpoints and changed version claims before Gmail access", async () => {
+    const prior = { historyId: "11", configVersion: "v1", revision: 1 };
+    const legacy = setup(prior);
+    legacy.deps.claims.claim.mockResolvedValue({ status: "created" });
+    expect(await pollGmail(scope, config, legacy.deps)).toEqual({
+      status: "failed",
+    });
+    expect(legacy.deps.client.history).not.toHaveBeenCalled();
+    const changed = setup(prior);
+    changed.deps.claims.claim.mockResolvedValue({ status: "conflict" });
+    expect(await pollGmail(scope, config, changed.deps)).toEqual({
+      status: "failed",
+    });
+    expect(changed.deps.client.history).not.toHaveBeenCalled();
+    const missingMarker = setup(prior);
+    missingMarker.deps.attempts.isInitialized.mockResolvedValue(false);
+    expect(await pollGmail(scope, config, missingMarker.deps)).toEqual({
+      status: "failed",
+    });
+    expect(missingMarker.deps.claims.claim).not.toHaveBeenCalled();
+    const missingClaim = setup(prior);
+    missingClaim.deps.claims.hasClaim.mockResolvedValue(false);
+    expect(await pollGmail(scope, config, missingClaim.deps)).toEqual({
+      status: "failed",
+    });
+    expect(missingClaim.deps.claims.claim).not.toHaveBeenCalled();
+  });
   it("uses a watermark before paginated full listing and reconciles history before committing", async () => {
     const { deps, seen, getCheckpoint } = setup();
     vi.mocked(deps.client.list)
@@ -93,7 +144,7 @@ describe("Gmail polling boundary", () => {
       configVersion: "v1",
       revision: 1,
     });
-    expect(deps.policy.authorize).toHaveBeenCalledTimes(8);
+    expect(deps.policy.check).toHaveBeenCalledTimes(8);
   });
   it("uses the stored history checkpoint and advances only after every page", async () => {
     const { deps, getCheckpoint } = setup({
@@ -131,7 +182,7 @@ describe("Gmail polling boundary", () => {
       }),
     ]) {
       const { deps } = setup();
-      deps.policy.authorize = authorize;
+      deps.policy.check = authorize;
       expect(await pollGmail(scope, config, deps)).toEqual({
         status: "policy_denied",
       });
@@ -160,7 +211,7 @@ describe("Gmail polling boundary", () => {
         status: "failed",
       });
       expect(getCheckpoint()?.historyId).toBe("11");
-      expect(deps.checkpoints.compareAndSet).not.toHaveBeenCalled();
+      expect(deps.attempts.publish).not.toHaveBeenCalled();
     }
   });
   it("returns reconnect on revoked access without changing checkpoint", async () => {
@@ -196,6 +247,7 @@ describe("Gmail polling boundary", () => {
       configVersion: "old",
       revision: 1,
     });
+    changed.deps.claims.claim.mockResolvedValue({ status: "created" });
     expect(await pollGmail(scope, config, changed.deps)).toEqual({
       status: "completed",
       mode: "full",
@@ -219,7 +271,7 @@ describe("Gmail polling boundary", () => {
       nextPageToken: "same",
     });
     expect(await pollGmail(scope, config, deps)).toEqual({ status: "failed" });
-    expect(deps.checkpoints.compareAndSet).not.toHaveBeenCalled();
+    expect(deps.attempts.publish).not.toHaveBeenCalled();
     const limited = setup();
     vi.mocked(limited.deps.client.list).mockResolvedValueOnce({
       messageIds: [],
@@ -231,7 +283,7 @@ describe("Gmail polling boundary", () => {
   });
   it("returns conflict when a concurrent sync wins the checkpoint compare-and-set", async () => {
     const { deps } = setup();
-    deps.checkpoints.compareAndSet.mockResolvedValue(false);
+    deps.attempts.publish.mockResolvedValue(false);
     expect(await pollGmail(scope, config, deps)).toEqual({
       status: "checkpoint_conflict",
     });
@@ -246,7 +298,7 @@ describe("Gmail polling boundary", () => {
     const { deps } = setup();
     deps.ledger.finishFullSync.mockRejectedValue(new Error("private"));
     expect(await pollGmail(scope, config, deps)).toEqual({ status: "failed" });
-    expect(deps.checkpoints.compareAndSet).not.toHaveBeenCalled();
+    expect(deps.attempts.publish).not.toHaveBeenCalled();
     expect(deps.lease.release).toHaveBeenCalledWith(scope, "fence1");
   });
   it("rejects history watermark regressions before changing the checkpoint", async () => {
