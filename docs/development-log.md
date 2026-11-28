@@ -1,6 +1,6 @@
 # Development log
 
-Approximate elapsed development time recorded: 7.75 hours (partial; estimated)
+Approximate elapsed development time recorded: 9.25 hours (partial; estimated)
 Sessions with unknown duration: 4
 
 Timing method: elapsed active development time; overlapping work counts once. See the [roadmap](roadmap.md).
@@ -19,4 +19,5 @@ Timing method: elapsed active development time; overlapping work counts once. Se
 | 2026-11-27 | I02: ingestion foundations | 0.5 hours (owner estimate) | Developed offline manual import, source-policy and Gmail synchronization components; integration and security review remain in progress. No live account or credentials used. |
 | 2026-11-27 | I02: durable ledger and staging recovery | Unknown | Implemented an inactive Gmail ledger and local staging cleanup; reviewed simplicity and removed duplication. Integrated recovery and security review remain in progress. No live account or credentials used. |
 | 2026-11-27 | I02: retention and recovery design | Unknown | Recorded the owner's retention decisions, prepared a recovery and visibility proposal, and implemented an inactive fenced configuration claim with architecture and security input. Gmail remains inactive. |
-| 2026-11-28 | I02: recovery and visibility implementation | Unknown | Added a local Gmail composition with synthetic acceptance, guarded sync and retention, and partial disconnect and credential recovery. Local CLI, legacy migration and complete disconnect remain unfinished; Gmail remains inactive. |
+| 2026-11-28 | I02: recovery and visibility implementation | 1.5 hours (owner estimate) | Added a local Gmail composition with synthetic acceptance, guarded sync and retention, and partial disconnect and credential recovery. Local CLI, legacy migration and complete disconnect remain unfinished; Gmail remains inactive. |
+| 2026-11-28 | Reflection: agent-assisted development and recovery complexity | Unknown | Recorded [engineering insights](engineering-insights.md), review guidance and a recovery simplification proposal with specialist input. Planned disabled functionality remains in place. |

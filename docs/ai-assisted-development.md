@@ -2,6 +2,8 @@
 
 The human owns product and architecture decisions, review and publication. The orchestrator chooses specialists only when their expertise or independent review adds value. Seven role definitions are provided under `.codex/agents`; they are development roles, not product runtime agents. See [workflow](agent-workflow.md). A straightforward change can use one agent. Actual usage must be reported, never inferred from definitions.
 
+See [engineering insights](engineering-insights.md) for the project's observations, limitations and questions about multi-agent development, review costs and simplicity.
+
 Prefer the owner's Terra Light where available, or an explicitly selected lightweight parent model when per-agent selection is unavailable. The owner selected GPT-6.1 Terra Light in the parent chat. Official documentation describes inherited model and reasoning when no subagent override is set; the role files intentionally leave both unset. Verify actual behavior in the active client, and do not silently switch to a more expensive model. Ask before stronger models or unusually large workflows. Do not infer Plus quotas, buy credits or use a separately billed API as fallback. Runtime API costs are separate.
 
 Illustrative workflow, not a record of execution: architect and QA define a matching contract; TypeScript implements deterministic cases; a separate QA review examines evidence and regressions; the orchestrator runs checks and submits the result to the owner. Security reviews sensitive boundaries. Cap active specialists at three and never sum concurrent durations as elapsed time.
